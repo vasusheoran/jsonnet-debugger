@@ -1,43 +1,76 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"github.com/grafana/jsonnet-debugger/pkg/utils"
 	"io"
 	"log/slog"
 	"os"
 	"path"
-
-	"github.com/lmittmann/tint"
 )
 
 var (
 	// Set with `-ldflags="-X 'main.version=<version>'"`
-	version = "dev"
+	Version = "dev"
 )
 
-func printVersion(o io.Writer) {
-	fmt.Fprintf(o, "jsonnet-debugger version %s\n", version)
-}
+var logger *utils.CustomLogger
 
-func usage(o io.Writer) {
-	printVersion(o)
-	fmt.Fprintln(o)
-	fmt.Fprintln(o, "jsonnice {<option>} { <filename> }")
-	fmt.Fprintln(o)
-	fmt.Fprintln(o, "Available options:")
-	fmt.Fprintln(o, "  -h / --help                This message")
-	fmt.Fprintln(o, "  -e / --exec                Treat filename as code")
-	fmt.Fprintln(o, "  -J / --jpath <dir>         Specify an additional library search dir")
-	fmt.Fprintln(o, "  -d / --dap                 Start a debug-adapter-protocol server")
-	fmt.Fprintln(o, "  -s / --stdin               Start a debug-adapter-protocol session using stdion/stdout for communication")
-	fmt.Fprintln(o, "  -l / --log-level           Set the log level. Allowed values: debug,info,warn,error")
-	fmt.Fprintln(o, "  --version                  Print version")
-	fmt.Fprintln(o)
-	fmt.Fprintln(o, "In all cases:")
-	fmt.Fprintln(o, "  Multichar options are expanded e.g. -abc becomes -a -b -c.")
-	fmt.Fprintln(o, "  The -- option suppresses option processing for subsequent arguments.")
-	fmt.Fprintln(o, "  Note that since filenames and jsonnet programs can begin with -, it is")
-	fmt.Fprintln(o, "  advised to use -- if the argument is unknown, e.g. jsonnice -- \"$FILENAME\".")
+func main() {
+	cfg := config{
+		jpath:    []string{},
+		extCode:  make(map[string]interface{}),
+		tlaCode:  make(map[string]interface{}),
+		logLevel: slog.LevelDebug,
+	}
+	file, err := os.OpenFile("dap.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
+	logger = utils.NewCustomLogger(file, "")
+
+	status, err := processArgs(os.Args[1:], &cfg, file)
+
+	if err != nil {
+		logger.Error(err.Error())
+	}
+
+	switch status {
+	case processArgsStatusContinue:
+		break
+	case processArgsStatusSuccessUsage:
+		utils.Usage(file, Version)
+		os.Exit(0)
+	case processArgsStatusFailureUsage:
+		if err != nil {
+			logger.Error(err.Error())
+		}
+		utils.Usage(file, Version)
+		os.Exit(1)
+	case processArgsStatusSuccess:
+		os.Exit(0)
+	case processArgsStatusFailure:
+		os.Exit(1)
+	}
+
+	if cfg.dap {
+		var err error
+		if cfg.stdin {
+			err = dapStdin(cfg)
+		} else {
+			err = dapServer("54321", cfg)
+		}
+		if err != nil {
+			logger.Error("dap server terminated", "err", err)
+		}
+		return
+	}
+
+	inputFile := cfg.inputFile
+	input := safeReadInput(cfg.filenameIsCode, &inputFile)
+	if !cfg.filenameIsCode {
+		cfg.jpath = append(cfg.jpath, path.Dir(inputFile))
+	}
+	repl := MakeReplDebugger(inputFile, input, cfg.jpath)
+	repl.Run()
 }
 
 type config struct {
@@ -47,6 +80,8 @@ type config struct {
 	jpath          []string
 	logLevel       slog.Level
 	stdin          bool
+	extCode        map[string]interface{}
+	tlaCode        map[string]interface{}
 }
 
 type processArgsStatus int
@@ -92,7 +127,7 @@ func simplifyArgs(args []string) (r []string) {
 	return
 }
 
-func processArgs(givenArgs []string, config *config) (processArgsStatus, error) {
+func processArgs(givenArgs []string, cfg *config, file *os.File) (processArgsStatus, error) {
 	args := simplifyArgs(givenArgs)
 
 	remainingArgs := make([]string, 0, len(args))
@@ -103,12 +138,12 @@ func processArgs(givenArgs []string, config *config) (processArgsStatus, error) 
 		if arg == "-h" || arg == "--help" {
 			return processArgsStatusSuccessUsage, nil
 		} else if arg == "-v" || arg == "--version" {
-			printVersion(os.Stdout)
+			utils.PrintVersion(file, Version)
 			return processArgsStatusSuccess, nil
 		} else if arg == "-e" || arg == "--exec" {
-			config.filenameIsCode = true
+			cfg.filenameIsCode = true
 		} else if arg == "-s" || arg == "--stdin" {
-			config.stdin = true
+			cfg.stdin = true
 		} else if arg == "--" {
 			// All subsequent args are not options.
 			i++
@@ -121,28 +156,40 @@ func processArgs(givenArgs []string, config *config) (processArgsStatus, error) 
 			if len(dir) == 0 {
 				return processArgsStatusFailure, fmt.Errorf("-J argument was empty string")
 			}
-			config.jpath = append(config.jpath, dir)
+			cfg.jpath = append(cfg.jpath, dir)
 		} else if arg == "-d" || arg == "--dap" {
-			config.dap = true
+			cfg.dap = true
 		} else if arg == "-l" || arg == "--log-level" {
 			level := nextArg(&i, args)
 			if len(level) == 0 {
 				return processArgsStatusFailure, fmt.Errorf("no log level specified")
 			}
-			slvl := slog.LevelError
+			slvl := slog.LevelDebug
 			switch level {
 			case "debug":
 				slvl = slog.LevelDebug
 			case "info":
 				slvl = slog.LevelInfo
-			case "warn":
-				slvl = slog.LevelWarn
 			case "error":
 				slvl = slog.LevelError
 			default:
 				return processArgsStatusFailure, fmt.Errorf("invalid log level %s. Allowed: debug,info,warn,error", level)
 			}
-			config.logLevel = slvl
+			cfg.logLevel = slvl
+		} else if arg == "--extCode" {
+			argValue := nextArg(&i, args)
+			_, err := parseCode(cfg.extCode, argValue)
+			if err != nil {
+				logger.Error("err", err)
+				return processArgsStatusFailure, err
+			}
+		} else if arg == "--tlaCode" {
+			argValue := nextArg(&i, args)
+			_, err := parseCode(cfg.tlaCode, argValue)
+			if err != nil {
+				logger.Error("err", err)
+				return processArgsStatusFailure, err
+			}
 		} else if len(arg) > 1 && arg[0] == '-' {
 			return processArgsStatusFailure, fmt.Errorf("unrecognized argument: %s", arg)
 		} else {
@@ -150,12 +197,12 @@ func processArgs(givenArgs []string, config *config) (processArgsStatus, error) 
 		}
 	}
 
-	if config.dap {
+	if cfg.dap {
 		return processArgsStatusContinue, nil
 	}
 
 	want := "filename"
-	if config.filenameIsCode {
+	if cfg.filenameIsCode {
 		want = "code"
 	}
 	if len(remainingArgs) == 0 {
@@ -166,8 +213,26 @@ func processArgs(givenArgs []string, config *config) (processArgsStatus, error) 
 		panic("Internal error: expected a single input file.")
 	}
 
-	config.inputFile = remainingArgs[0]
+	cfg.inputFile = remainingArgs[0]
 	return processArgsStatusContinue, nil
+}
+
+func parseCode(codeMap map[string]interface{}, unparsed string) (map[string]interface{}, error) {
+	var code map[string]interface{}
+	err := json.Unmarshal([]byte(unparsed), &code)
+	if err != nil {
+		panic(err)
+	}
+
+	if codeMap == nil {
+		codeMap = make(map[string]interface{}, len(code))
+	}
+
+	for key, value := range code {
+		codeMap[key] = value
+	}
+
+	return codeMap, nil
 }
 
 // readInput gets Jsonnet code from the given place (file, commandline, stdin).
@@ -210,57 +275,4 @@ func safeReadInput(filenameIsCode bool, filename *string) string {
 		os.Exit(1)
 	}
 	return output
-}
-
-func main() {
-	config := config{
-		jpath:    []string{},
-		logLevel: slog.LevelError,
-	}
-	status, err := processArgs(os.Args[1:], &config)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ERROR: "+err.Error())
-	}
-	switch status {
-	case processArgsStatusContinue:
-		break
-	case processArgsStatusSuccessUsage:
-		usage(os.Stdout)
-		os.Exit(0)
-	case processArgsStatusFailureUsage:
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "")
-		}
-		usage(os.Stderr)
-		os.Exit(1)
-	case processArgsStatusSuccess:
-		os.Exit(0)
-	case processArgsStatusFailure:
-		os.Exit(1)
-	}
-
-	slog.SetDefault(slog.New(tint.NewHandler(os.Stderr, &tint.Options{
-		Level: config.logLevel,
-	})))
-
-	if config.dap {
-		var err error
-		if config.stdin {
-			err = dapStdin()
-		} else {
-			err = dapServer("54321")
-		}
-		if err != nil {
-			slog.Error("dap server terminated", "err", err)
-		}
-		return
-	}
-
-	inputFile := config.inputFile
-	input := safeReadInput(config.filenameIsCode, &inputFile)
-	if !config.filenameIsCode {
-		config.jpath = append(config.jpath, path.Dir(inputFile))
-	}
-	repl := MakeReplDebugger(inputFile, input, config.jpath)
-	repl.Run()
 }
