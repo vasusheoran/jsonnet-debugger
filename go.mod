@@ -18,3 +18,5 @@ require (
 	gopkg.in/yaml.v2 v2.2.7 // indirect
 	sigs.k8s.io/yaml v1.1.0 // indirect
 )
+
+replace github.com/google/go-jsonnet => github.com/vasusheoran/go-jsonnet v0.0.0-20240809040840-464730b1b2ef

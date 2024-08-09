@@ -4,9 +4,9 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"github.com/google/go-jsonnet"
+	"github.com/google/go-jsonnet/ast"
 	"io"
-	"log"
-	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -14,37 +14,35 @@ import (
 	"sync"
 
 	"github.com/google/go-dap"
-	"github.com/google/go-jsonnet"
-	"github.com/google/go-jsonnet/ast"
 )
 
-func dapServer(port string) error {
+func dapServer(port string, cfg config) error {
 	listener, err := net.Listen("tcp", ":"+port)
 	if err != nil {
 		return err
 	}
 	defer listener.Close()
-	slog.Info("Started server", "addr", listener.Addr())
+	logger.Info("Started server", "addr", listener.Addr())
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			slog.Error("Connection failed", "err", err)
+			logger.Error("Connection failed", "err", err)
 			continue
 		}
-		slog.Info("Accepted connection", "remote", conn.RemoteAddr())
+		logger.Info("Accepted connection", "remote", conn.RemoteAddr())
 		// Handle multiple client connections concurrently
-		go handleConnection(conn)
+		go handleConnection(conn, cfg)
 	}
 }
 
-func dapStdin() error {
-	slog.Info("starting DAP using STDIN/STDOUT as communication protocol")
+func dapStdin(cfg config) error {
+	logger.Info("starting DAP using STDIN/STDOUT as communication protocol")
 	debugSession := JsonnetDebugSession{
 		rw:        bufio.NewReadWriter(bufio.NewReader(os.Stdin), bufio.NewWriter(os.Stdout)),
 		sendQueue: make(chan dap.Message),
 		stopDebug: make(chan struct{}),
-		debugger:  jsonnet.MakeDebugger(),
+		debugger:  getDebugger(cfg),
 	}
 
 	go debugSession.sendFromQueue()
@@ -54,13 +52,14 @@ func dapStdin() error {
 		err := debugSession.handleRequest()
 		if err != nil {
 			if err == io.EOF {
-				slog.Debug("No more data to read", "err", err)
+				logger.Debug("No more data to read", "err", err)
 				break
 			}
 			// There maybe more messages to process, but
 			// we will start with the strict behavior of only accepting
 			// expected inputs.
-			log.Fatal("Server error: ", err)
+			logger.Error("Server error: ", err)
+			//log.Fatal("Server error: ", err)
 		}
 	}
 
@@ -70,12 +69,12 @@ func dapStdin() error {
 	return nil
 }
 
-func handleConnection(conn net.Conn) {
+func handleConnection(conn net.Conn, cfg config) {
 	debugSession := JsonnetDebugSession{
 		rw:        bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn)),
 		sendQueue: make(chan dap.Message),
 		stopDebug: make(chan struct{}),
-		debugger:  jsonnet.MakeDebugger(),
+		debugger:  getDebugger(cfg),
 	}
 
 	go debugSession.sendFromQueue()
@@ -85,17 +84,18 @@ func handleConnection(conn net.Conn) {
 		err := debugSession.handleRequest()
 		if err != nil {
 			if err == io.EOF {
-				slog.Debug("No more data to read", "err", err)
+				logger.Debug("No more data to read", "err", err)
 				break
 			}
 			// There maybe more messages to process, but
 			// we will start with the strict behavior of only accepting
 			// expected inputs.
-			log.Fatal("Server error: ", err)
+			//log.Fatal("Server error: ", err)
+			logger.Error("Server error: ", err)
 		}
 	}
 
-	slog.Debug("Closing connection", "remote", conn.RemoteAddr())
+	logger.Debug("Closing connection", "remote", conn.RemoteAddr())
 	close(debugSession.stopDebug)
 	debugSession.sendWg.Wait()
 	close(debugSession.sendQueue)
@@ -107,7 +107,7 @@ func (ds *JsonnetDebugSession) handleRequest() error {
 	if err != nil {
 		return err
 	}
-	slog.Debug("received request", "request", fmt.Sprintf("%#v", request))
+	logger.Debug("received request", "request", fmt.Sprintf("%#v", request))
 	ds.sendWg.Add(1)
 	go func() {
 		ds.dispatchRequest(request)
@@ -233,7 +233,8 @@ func (ds *JsonnetDebugSession) dispatchRequest(request dap.Message) {
 	case *dap.BreakpointLocationsRequest:
 		ds.onBreakpointLocationsRequest(request)
 	default:
-		log.Fatalf("Unable to process %#v", request)
+		logger.Error("Unable to process %#v", request)
+		//log.Fatalf("Unable to process %#v", request)
 	}
 }
 
@@ -251,7 +252,7 @@ func (ds *JsonnetDebugSession) send(message dap.Message) {
 func (ds *JsonnetDebugSession) sendFromQueue() {
 	for message := range ds.sendQueue {
 		dap.WriteProtocolMessage(ds.rw.Writer, message)
-		slog.Debug("message sent", "data", message)
+		logger.Debug("message sent", "data", message)
 		ds.rw.Flush()
 	}
 }
@@ -259,6 +260,11 @@ func (ds *JsonnetDebugSession) sendFromQueue() {
 // -----------------------------------------------------------------------
 // Very Fake Debugger
 //
+
+type ExceptionInfo struct {
+	ID      int
+	Message string
+}
 
 // The debugging session will keep track of how many breakpoints
 // have been set. Once start-up is done (i.e. configurationDone
@@ -276,6 +282,9 @@ type JsonnetDebugSession struct {
 	// the sendFromQueue goroutine that it can exit.
 	sendQueue chan dap.Message
 	sendWg    sync.WaitGroup
+
+	exceptionInfoMap map[int]*ExceptionInfo
+	nextExceptionId  int
 
 	// stopDebug is used to notify long-running handlers to stop processing.
 	stopDebug chan struct{}
@@ -349,7 +358,8 @@ type launchRequest struct {
 }
 
 func (ds *JsonnetDebugSession) onLaunchRequest(request *dap.LaunchRequest) {
-	log.Printf("Received launch request: %s\n", request.Arguments)
+	logger.Debug("Received launch request: %s\n", request.Arguments)
+	//log.Printf( "Received launch request: %s\n", request.Arguments)
 	lr := launchRequest{}
 	err := json.Unmarshal(request.Arguments, &lr)
 	if err != nil {
@@ -362,7 +372,7 @@ func (ds *JsonnetDebugSession) onLaunchRequest(request *dap.LaunchRequest) {
 		return
 	}
 	ds.debugger.Launch(lr.Program, string(raw), lr.JPaths)
-	slog.Debug("Starting debugging", "breakpoints", ds.debugger.ActiveBreakpoints(), "file", lr.Program)
+	logger.Debug("Starting debugging", "breakpoints", ds.debugger.ActiveBreakpoints(), "file", lr.Program)
 	response := &dap.LaunchResponse{}
 	response.Response = *newResponse(request.Seq, request.Command)
 	ds.send(response)
@@ -394,7 +404,7 @@ func (ds *JsonnetDebugSession) onSetBreakpointsRequest(request *dap.SetBreakpoin
 	for i, b := range request.Arguments.Breakpoints {
 		_, err := ds.debugger.SetBreakpoint(request.Arguments.Source.Path, b.Line, -1)
 		if err != nil {
-			slog.Error("failed to set breakpoint", "err", err)
+			logger.Error("failed to set breakpoint", "err", err)
 			continue
 		}
 		response.Body.Breakpoints[i].Line = b.Line
@@ -439,7 +449,10 @@ func (ds *JsonnetDebugSession) onStepInRequest(request *dap.StepInRequest) {
 }
 
 func (ds *JsonnetDebugSession) onStepOutRequest(request *dap.StepOutRequest) {
-	ds.send(newErrorResponse(request.Seq, request.Command, "StepOutRequest is not yet supported"))
+	ds.debugger.Step()
+	response := &dap.StepOutResponse{}
+	response.Response = *newResponse(request.Seq, request.Command)
+	ds.send(response)
 }
 
 func (ds *JsonnetDebugSession) onStepBackRequest(request *dap.StepBackRequest) {
@@ -475,7 +488,7 @@ func (ds *JsonnetDebugSession) onStackTraceRequest(request *dap.StackTraceReques
 		if frame.Loc.File != nil {
 			abs, err := filepath.Abs(string(frame.Loc.File.DiagnosticFileName))
 			if err != nil {
-				slog.Error("invalid location for stack frame")
+				logger.Error("invalid location for stack frame")
 				continue
 			}
 			fr.Source = &dap.Source{Name: string(frame.Loc.File.DiagnosticFileName), Path: abs, SourceReference: 0}
@@ -522,7 +535,7 @@ func (ds *JsonnetDebugSession) onVariablesRequest(request *dap.VariablesRequest)
 	for _, v := range vars {
 		val, err := ds.debugger.LookupValue(string(v))
 		if err != nil {
-			slog.Warn("Failed to get value for variable listing", "var", v, "err", err)
+			logger.Error("Failed to get value for variable listing", "var", v, "err", err)
 			val = ""
 		}
 		if string(v) == "self" {
@@ -551,7 +564,7 @@ func (ds *JsonnetDebugSession) onSetExpressionRequest(request *dap.SetExpression
 }
 
 func (ds *JsonnetDebugSession) onSourceRequest(request *dap.SourceRequest) {
-	slog.Debug("source requested", "source", request.Arguments.Source.SourceReference)
+	logger.Debug("source requested", "source", request.Arguments.Source.SourceReference)
 	ds.send(newErrorResponse(request.Seq, request.Command, "SourceRequest is not yet supported"))
 }
 
@@ -587,6 +600,7 @@ func (ds *JsonnetDebugSession) onStepInTargetsRequest(request *dap.StepInTargets
 }
 
 func (ds *JsonnetDebugSession) onGotoTargetsRequest(request *dap.GotoTargetsRequest) {
+
 	ds.send(newErrorResponse(request.Seq, request.Command, "GotoTargetRequest is not yet supported"))
 }
 
@@ -594,7 +608,22 @@ func (ds *JsonnetDebugSession) onCompletionsRequest(request *dap.CompletionsRequ
 	ds.send(newErrorResponse(request.Seq, request.Command, "CompletionRequest is not yet supported"))
 }
 
-func (ds *JsonnetDebugSession) onExceptionInfoRequest(request *dap.ExceptionInfoRequest) {
+func (ds *JsonnetDebugSession) onExceptionInfoRequest(request *dap.ExceptionInfoRequest) { // Find the exception based on the request's exceptionId
+	//exceptionId := request.Arguments.ThreadId
+	//
+	//response := &dap.ExceptionInfoResponse{}
+	//// Prepare response
+	//response := dap.ExceptionInfoResponse{
+	//	Id: request.Id,
+	//	Body: dap.ExceptionInfoResponseBody{
+	//		ExceptionId: exceptionId,
+	//		Message:     exceptionInfo.Message,
+	//		Stacktrace:  exceptionInfo.Stacktrace, // Convert to DAP format if necessary
+	//	},
+	//	Success: true,
+	//}
+
+	// Send response to the client
 	ds.send(newErrorResponse(request.Seq, request.Command, "ExceptionRequest is not yet supported"))
 }
 
