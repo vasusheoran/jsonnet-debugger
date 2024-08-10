@@ -1,0 +1,6 @@
+*.xml
+/tmp
+,vscode
+.idea
+*.log
+.DS_Store
