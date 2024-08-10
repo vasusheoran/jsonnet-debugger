@@ -12,7 +12,7 @@ import (
 
 var (
 	// Set with `-ldflags="-X 'main.version=<version>'"`
-	Version = "0.0.1"
+	version = "dev"
 )
 
 var logger *utils.CustomLogger
@@ -24,26 +24,30 @@ func main() {
 		tlaCode:  make(map[string]interface{}),
 		logLevel: slog.LevelDebug,
 	}
-	file, err := os.OpenFile("dap.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
-	logger = utils.NewCustomLogger(file, "")
 
-	status, err := processArgs(os.Args[1:], &cfg, os.Stdout)
-
+	status, err := processArgs(os.Args[1:], &cfg, os.Stderr)
 	if err != nil {
-		logger.Error(err.Error())
+		fmt.Fprintln(os.Stderr, "ERROR: "+err.Error())
+	}
+
+	file, err := os.OpenFile(cfg.logFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
+	if err != nil {
+		logger = utils.NewCustomLogger(os.Stderr, "")
+	} else {
+		logger = utils.NewCustomLogger(file, "")
 	}
 
 	switch status {
 	case processArgsStatusContinue:
 		break
 	case processArgsStatusSuccessUsage:
-		utils.Usage(file, Version)
+		utils.Usage(file, version)
 		os.Exit(0)
 	case processArgsStatusFailureUsage:
 		if err != nil {
 			logger.Error(err.Error())
 		}
-		utils.Usage(file, Version)
+		utils.Usage(file, version)
 		os.Exit(1)
 	case processArgsStatusSuccess:
 		os.Exit(0)
@@ -78,6 +82,7 @@ type config struct {
 	filenameIsCode bool
 	dap            bool
 	jpath          []string
+	logFilePath    string
 	logLevel       slog.Level
 	stdin          bool
 	extCode        map[string]interface{}
@@ -138,7 +143,7 @@ func processArgs(givenArgs []string, cfg *config, file *os.File) (processArgsSta
 		if arg == "-h" || arg == "--help" {
 			return processArgsStatusSuccessUsage, nil
 		} else if arg == "-v" || arg == "--version" {
-			utils.PrintVersion(file, Version)
+			utils.PrintVersion(file, version)
 			return processArgsStatusSuccess, nil
 		} else if arg == "-e" || arg == "--exec" {
 			cfg.filenameIsCode = true
@@ -176,6 +181,9 @@ func processArgs(givenArgs []string, cfg *config, file *os.File) (processArgsSta
 				return processArgsStatusFailure, fmt.Errorf("invalid log level %s. Allowed: debug,info,warn,error", level)
 			}
 			cfg.logLevel = slvl
+		} else if arg == "-f" || arg == "--log-file" {
+			filePath := nextArg(&i, args)
+			cfg.logFilePath = filePath
 		} else if arg == "--extCode" {
 			argValue := nextArg(&i, args)
 			_, err := parseCode(cfg.extCode, argValue)
