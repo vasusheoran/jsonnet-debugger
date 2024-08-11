@@ -43,6 +43,7 @@ func dapStdin(cfg config) error {
 		sendQueue: make(chan dap.Message),
 		stopDebug: make(chan struct{}),
 		debugger:  getDebugger(cfg),
+		cfg:       cfg,
 	}
 
 	go debugSession.sendFromQueue()
@@ -75,6 +76,7 @@ func handleConnection(conn net.Conn, cfg config) {
 		sendQueue: make(chan dap.Message),
 		stopDebug: make(chan struct{}),
 		debugger:  getDebugger(cfg),
+		cfg:       cfg,
 	}
 
 	go debugSession.sendFromQueue()
@@ -107,7 +109,7 @@ func (ds *JsonnetDebugSession) handleRequest() error {
 	if err != nil {
 		return err
 	}
-	logger.Debug("received request", "request", fmt.Sprintf("%#v", request))
+	logger.Debug("received request")
 	ds.sendWg.Add(1)
 	go func() {
 		ds.dispatchRequest(request)
@@ -296,6 +298,7 @@ type JsonnetDebugSession struct {
 
 	debugger *jsonnet.Debugger
 	current  ast.Node
+	cfg      config
 }
 
 // -----------------------------------------------------------------------
@@ -371,6 +374,7 @@ func (ds *JsonnetDebugSession) onLaunchRequest(request *dap.LaunchRequest) {
 		ds.send(newErrorResponse(request.Seq, request.Command, "Failed to open file: "+err.Error()))
 		return
 	}
+	logger.Debug("Launching", "Program", lr.Program, "Jpaths", lr.JPaths)
 	ds.debugger.Launch(lr.Program, string(raw), lr.JPaths)
 	logger.Debug("Starting debugging", "breakpoints", ds.debugger.ActiveBreakpoints(), "file", lr.Program)
 	response := &dap.LaunchResponse{}
@@ -583,6 +587,7 @@ func (ds *JsonnetDebugSession) onTerminateThreadsRequest(request *dap.TerminateT
 func (ds *JsonnetDebugSession) onEvaluateRequest(request *dap.EvaluateRequest) {
 	v, err := ds.debugger.LookupValue(request.Arguments.Expression)
 	if err != nil {
+		logger.Error("Error while looking up value", "err", err.Error())
 		ds.send(newErrorResponse(request.Seq, request.Command, fmt.Sprintf("Failed to look up variable: %s", err.Error())))
 		return
 	}

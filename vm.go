@@ -10,6 +10,21 @@ func getDebugger(cfg config) *jsonnet.Debugger {
 	d := jsonnet.MakeDebugger()
 
 	vm := d.GetVM()
+	//if cfg.ResolvePathsWithTanka {
+	//	jpath, _, _, err := jpath.Resolve(path, false)
+	//	if err != nil {
+	//		log.Debugf("Unable to resolve jpath for %s: %s", path, err)
+	//		// nolint: gocritic
+	//		jpath = append(s.configuration.JPaths, filepath.Dir(path))
+	//	}
+	//	vm = tankaJsonnet.MakeRawVM(jpath, nil, nil, 0)
+	//} else {
+	// nolint: gocritic
+	//jpath := append(cfg.jpath, filepath.Dir("."))
+	//vm = jsonnet.MakeVM()
+	//importer := &jsonnet.FileImporter{JPaths: jpath}
+	//vm.Importer(importer)
+	//}
 
 	err := parseTLACode(cfg.tlaCode, vm)
 	if err != nil {

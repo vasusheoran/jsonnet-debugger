@@ -12,7 +12,7 @@ import (
 
 var (
 	// Set with `-ldflags="-X 'main.version=<version>'"`
-	Version = "dev"
+	Version = "0.0.1"
 )
 
 var logger *utils.CustomLogger
@@ -27,7 +27,7 @@ func main() {
 	file, err := os.OpenFile("dap.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
 	logger = utils.NewCustomLogger(file, "")
 
-	status, err := processArgs(os.Args[1:], &cfg, file)
+	status, err := processArgs(os.Args[1:], &cfg, os.Stdout)
 
 	if err != nil {
 		logger.Error(err.Error())
