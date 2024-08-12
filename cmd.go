@@ -41,13 +41,13 @@ func main() {
 	case processArgsStatusContinue:
 		break
 	case processArgsStatusSuccessUsage:
-		utils.Usage(file, version)
+		utils.Usage(os.Stdout, version)
 		os.Exit(0)
 	case processArgsStatusFailureUsage:
 		if err != nil {
 			logger.Error(err.Error())
 		}
-		utils.Usage(file, version)
+		utils.Usage(os.Stdout, version)
 		os.Exit(1)
 	case processArgsStatusSuccess:
 		os.Exit(0)
@@ -143,7 +143,7 @@ func processArgs(givenArgs []string, cfg *config, file *os.File) (processArgsSta
 		if arg == "-h" || arg == "--help" {
 			return processArgsStatusSuccessUsage, nil
 		} else if arg == "-v" || arg == "--version" {
-			utils.PrintVersion(file, version)
+			utils.PrintVersion(os.Stdout, version)
 			return processArgsStatusSuccess, nil
 		} else if arg == "-e" || arg == "--exec" {
 			cfg.filenameIsCode = true
